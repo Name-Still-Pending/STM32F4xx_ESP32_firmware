@@ -66,9 +66,9 @@ typedef struct{
 
 BaseType_t mqtt_init();
 
-MqttResponse_t mqtt_pub(uint8_t *topicName, uint8_t *msg, uint8_t qos, uint8_t retain, TickType_t timeout);
+MqttResponse_t mqtt_pub(int8_t *topicName, uint8_t *msg, uint8_t qos, uint8_t retain, TickType_t timeout);
 
-MqttResponse_t mqtt_pub_raw(uint8_t *topicName, void *msg, uint8_t len, uint8_t qos, uint8_t retain, TickType_t timeout);
+MqttResponse_t mqtt_pub_raw(int8_t *topicName, void *msg, uint8_t len, uint8_t qos, uint8_t retain, TickType_t timeout);
 
 MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, TickType_t timeout);
 
@@ -79,5 +79,7 @@ MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *t
 MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *topicName, TickType_t timeout);
 
 BaseType_t mqtt_poll(MqttSubHandle_t handle, MqttMessage_t *message, TickType_t timeout);
+
+BaseType_t mqtt_to_latest(MqttSubHandle_t handle);
 
 #endif /* WIFI_MQTT_FIRMWARE_INCLUDE_MQTT_DISPATCHER_H_ */

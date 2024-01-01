@@ -8,6 +8,6 @@
 #ifndef WIFI_MQTT_FIRMWARE_INCLUDE_WIFI_MQTT_EXAMPLE_H_
 #define WIFI_MQTT_FIRMWARE_INCLUDE_WIFI_MQTT_EXAMPLE_H_
 
-void createExampleTask();
+void createExampleTasks();
 
 #endif /* WIFI_MQTT_FIRMWARE_INCLUDE_WIFI_MQTT_EXAMPLE_H_ */

@@ -31,49 +31,71 @@
 #define MQTT_FLAG_PUB_OK			(1 << 3)
 #define MQTT_FLAG_PUB_FAIL		(1 << 4)
 
-#define TOPIC_BITFIELD_SIZE BITFIELD_SIZE(MQTT_MAX_TOPICS)
 #define SUBSCRIBER_BITFIELD_SIZE BITFIELD_SIZE(MQTT_MAX_SUBSCRIBERS)
 #define SET_DEADLINE(timeout) TickType_t deadline = (timeout) + xTaskGetTickCount()
 #define GET_TIMEOUT (deadline - xTaskGetTickCount())
+#define WAIT_FOR_CONN(timeout) if(!(xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, timeout) & MQTT_FLAG_CONNECTED)) return MQTT_TIMEOUT_NOCONN;
 
 //
 // private typedefs
 //
 
+
+typedef
+#if MQTT_MAX_SUBSCRIBERS <= 8
+		uint8_t
+#elif MQTT_MAX_SUBSCRIBERS <= 16
+		uint16_t
+#elif MQTT_MAX_SUBSCRIBERS <= 32
+		uint32_t
+#else
+		uint64_t
+#if MQTT_MAX_SUBSCRIBERS > 64
+#error "MQTT_MAX_SUBSCRIBERS cannot be larger than 64"
+#endif
+#endif
+		BitField_t;
+
+typedef struct{
+	BitField_t checks;
+	MqttMessage_t buffer;
+}AllocatedMessage_t;
+
 typedef struct{
 	int8_t *name;
-	uint8_t subscriber_bitfield[SUBSCRIBER_BITFIELD_SIZE];
+	BitField_t subscriber_bitfield;
 }MqttTopic_t;
+
 
 typedef struct{
 	int32_t id;
 	QueueHandle_t queue;
-	uint8_t topic_bitfield[TOPIC_BITFIELD_SIZE];
 	uint32_t flags;
+#if MQTT_STATIC_MESSAGE_QUEUES
+	StaticQueue_t _queue_static;
+	uint8_t _queue_storage_buffer[sizeof(AllocatedMessage_t*) * MQTT_MAX_MESSAGES_QUEUED];
+#endif
 }MqttSubscriber_t;
-
-
-
 //
 // private function prototypes
 //
 
 static void mqtt_dispatcher_init_task(void*);
 static void mqtt_dispatcher_task(void*);
-static Response_t mqtt_redirect_callback(uint8_t *msg, int16_t len);
+static Response_t mqtt_redirect_callback(uint8_t *msg, int16_t len, TickType_t timeout);
 static MqttResponse_t parse_input(uint8_t *msg, int16_t len);
 
 static BaseType_t subscriber_init(MqttSubscriber_t *handle, int32_t id, uint32_t flags);
-static BaseType_t subscriber_deinit(MqttSubscriber_t *handle);
+static BaseType_t subscriber_deinit(MqttSubscriber_t *handle, TickType_t timeout);
 static MqttResponse_t topic_init(MqttTopic_t *handle, const int8_t *name, int16_t qos, TickType_t timeout);
 static MqttResponse_t topic_deinit(MqttTopic_t *handle, TickType_t timeout);
 static BaseType_t topic_has_subscribers(MqttTopic_t *handle);
 static BaseType_t topic_set_subscriber(MqttTopic_t *topic, MqttSubscriber_t *sub, uint8_t v);
-static BaseType_t subscriber_set_topic(MqttSubscriber_t *sub, MqttTopic_t *topic, uint8_t v);
 static MqttTopic_t *get_topic(const int8_t *name);
 static MqttSubscriber_t *get_next_topic_subscriber(MqttTopic_t *topic);
-static BaseType_t parse_message(uint8_t *msg, int16_t len, MqttMessage_t *buffer);
-static void subscriber_send_message(MqttSubscriber_t *sub, MqttMessage_t *msg);
+static BaseType_t parse_message(uint8_t *msg, int16_t len, AllocatedMessage_t **buffer);
+static void subscriber_send_message(MqttSubscriber_t *sub, AllocatedMessage_t *msg);
+static void subscriber_copy_message(MqttSubscriber_t *sub, MqttMessage_t *buffer, AllocatedMessage_t *msg);
 
 
 //
@@ -100,7 +122,11 @@ static MqttSubscriber_t		subscribers[MQTT_MAX_SUBSCRIBERS];
 //
 // public function definitions
 //
-
+/**
+ * @brief Initializes all components of the MQTT dispatch system. Creates the MQTT_dispatcher and MQTT_dispatcher_init (timeout 60 s) tasks.
+ * @note Uses ESP32 communication. eps32_manager must be successfully initialized.
+ * @retval pdPASS on successful completion, pdFAIL otherwise
+ */
 BaseType_t mqtt_init(){
 #define NULL_CHECK(handle)if(!handle) return pdFAIL;
 	mqtt_flags_handle 				= xEventGroupCreateStatic(&mqtt_flags_static);
@@ -124,10 +150,19 @@ BaseType_t mqtt_init(){
 	return pdPASS;
 }
 
-MqttResponse_t mqtt_pub(uint8_t *topic, uint8_t *msg, uint8_t qos, uint8_t retain, TickType_t timeout){
+/**
+ * @brief Publishes an MQTT message.
+ * @note Meant for text only, do not use commas. If you want to publish binary data or messages where the publish command would exceed 256 characters, use mqtt_pub_raw instead.
+ * @param topic: MQTT topic to publish to
+ * @param msg: Message to publish
+ * @param qos: Quality of service level [0, 2]
+ * @param retain: true / false, retain message.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
+MqttResponse_t mqtt_pub(int8_t *topic, uint8_t *msg, uint8_t qos, uint8_t retain, TickType_t timeout){
 	SET_DEADLINE(timeout);
-	EventBits_t flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, timeout);
-	if(!(flags & MQTT_FLAG_CONNECTED)) return MQTT_TIMEOUT_NOCONN;
+	WAIT_FOR_CONN(GET_TIMEOUT);
 
 	uint8_t cmdBuf[256] = {0};
 	size_t len = sprintf(cmdBuf, "AT+MQTTPUB=0,\"%s\",\"%s\",%d,%d\r\n", topic, msg, qos, retain);
@@ -137,24 +172,43 @@ MqttResponse_t mqtt_pub(uint8_t *topic, uint8_t *msg, uint8_t qos, uint8_t retai
 	return esp32Resp == AT_RESP_OK ? MQTT_OK : MQTT_PUB_FAIL;
 }
 
-MqttResponse_t mqtt_pub_raw(uint8_t *topic, void *msg, uint8_t len, uint8_t qos, uint8_t retain, TickType_t timeout){
+/**
+ * @brief Publishes raw data to MQTT.
+ * @param topic: MQTT topic to publish to
+ * @param data: Data to publish.
+ * @param len: Exact size (bytes) of published data.
+ * @param qos: Quality of service level [0, 2]
+ * @param retain: true / false, retain message.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
+MqttResponse_t mqtt_pub_raw(int8_t *topic, void *data, uint8_t len, uint8_t qos, uint8_t retain, TickType_t timeout){
 	SET_DEADLINE(timeout);
-	EventBits_t flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, timeout);
-	if(!(flags & MQTT_FLAG_CONNECTED)) return MQTT_TIMEOUT_NOCONN;
+	WAIT_FOR_CONN(GET_TIMEOUT);
 
 	int8_t cmdBuf[256] = {0};
 	int32_t cmdLen = sprintf(cmdBuf, "AT+MQTTPUBRAW=0,\"%s\",%d,%d,%d\r\n", topic, len, (int16_t)qos, retain);
 
-	Response_t esp32Resp = esp32_command_long(cmdBuf, cmdLen, msg, len, GET_TIMEOUT);
+	Response_t esp32Resp = esp32_command_long(cmdBuf, cmdLen, data, len, GET_TIMEOUT);
 	if(esp32Resp != AT_RESP_OK)
 		return MQTT_PUB_FAIL;
 
 	return MQTT_OK;
 }
 
+/**
+ * @brief Initializes a subscriber and returns a handle.
+ * @note Not thread-safe. Do not share subscribers across threads/tasks.
+ * @note Make sure not to lose the handle.
+ * @note The total number of subscribers globally cannot exceed the MQTT_MAX_SUBSCRIBERS predefine (see MQTT_dispatcher_config.h)
+ * @param handle: Pointer to the variable where you want to store the subscriber handle.
+ * @param flags: Subscriber behavior settings. Use MqttSubscriberFlags_t enum.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
 MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, TickType_t timeout){
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
-	MqttResponse_t retval;
+	MqttResponse_t retval = MQTT_OK;
 
 	do{
 		// find first available subscriber spot
@@ -181,12 +235,20 @@ MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, Tick
 	return retval;
 }
 
+/**
+ * @brief Destroys a subscriber, freeing its slot.
+ * @note Untested, may not work.
+ * @param handle: Pointer to the variable, where the subscriber handle is stored. Said handle will be set to NULL on success.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
 MqttResponse_t mqtt_remove_subscriber(MqttSubHandle_t *handle, TickType_t timeout){
+	SET_DEADLINE(timeout);
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
 	MqttResponse_t retval = MQTT_OK;
 
 	do{
-		retval = subscriber_deinit((MqttSubscriber_t*)*handle);
+		retval = subscriber_deinit((MqttSubscriber_t*)*handle, GET_TIMEOUT);
 		if(retval != MQTT_OK) break;
 
 		*handle = NULL;
@@ -197,8 +259,18 @@ MqttResponse_t mqtt_remove_subscriber(MqttSubHandle_t *handle, TickType_t timeou
 	return retval;
 }
 
+/**
+ * @brief Subscribes a subscriber to a topic.
+ * @note The amount of unique topics across all subscribers globally is limited by MQTT_MAX_TOPICS predefine (see MQTT_dispatcher_config.h)
+ * @param handle: Handle of the subscriber.
+ * @param topicHandle: Pointer to the handle of the subscribed topic. If you do not need the handle (unadvised), you can pass NULL.
+ * @param topic: Name of the topic.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
 MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *topicHandle, const int8_t *topic, TickType_t timeout){
 	SET_DEADLINE(timeout);
+
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
 
 
@@ -225,7 +297,6 @@ MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *t
 		MqttSubscriber_t *subHandle = (MqttSubscriber_t*)handle;
 
 		topic_set_subscriber(topHandle, subHandle, 1);
-		subscriber_set_topic(subHandle, topHandle, 1);
 	}while(0);
 
 	xSemaphoreGive(subMutex_handle);
@@ -233,6 +304,15 @@ MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *t
 	return retval;
 }
 
+/**
+ * @brief Unsubscribes a subscriber from a topic.
+ * @note If there are no more subscriptions to the topic, it will be destroyed, freeing its slot.
+ * @note Untested, probably doesn't work.
+ * @param handle: Subscriber handle.
+ * @param topic: Pointer to the topic handle, so that it can be set to NULL on success.
+ * @param timeout: Operation timeout.
+ * @retval MQTT_OK on success, other on error.
+ */
 MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *topic, TickType_t timeout){
 	SET_DEADLINE(timeout);
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
@@ -255,7 +335,6 @@ MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t 
 			}
 		}
 
-		subscriber_set_topic(subHandle, topHandle, 0);
 		*topic = NULL;
 	}while(0);
 
@@ -263,8 +342,35 @@ MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t 
 	return retval;
 }
 
+/**
+ * @brief Waits for a message to arrive.
+ * @param handle: Subscriber handle.
+ * @param message: Received message buffer.
+ * @param timeout: Operation timeout.
+ * @retval pdTRUE on message received, pdFALSE on timeout.
+ */
 inline BaseType_t mqtt_poll(MqttSubHandle_t handle, MqttMessage_t *message, TickType_t timeout){
-	return xQueueReceive(((MqttSubscriber_t*)handle)->queue, message, timeout);
+	AllocatedMessage_t *allocMsg;
+	if(!xQueueReceive(((MqttSubscriber_t*)handle)->queue, &allocMsg, timeout)) return pdFALSE;
+	subscriber_copy_message((MqttSubscriber_t*)handle, message, allocMsg);
+	return pdTRUE;
+}
+
+/**
+ * @brief Moves the queue to the latest message.
+ * @note This could technically turn into an infinite loop, if the messages were written to the queue fast enough, but that should be impossible in practice.
+ * @param handle: Subscriber handle
+ * @retval The number of discarded messages.
+ */
+BaseType_t mqtt_to_latest(MqttSubHandle_t handle){
+	BaseType_t cnt = 0;
+	AllocatedMessage_t *ptr;
+	while(uxQueueMessagesWaiting(((MqttSubscriber_t*)handle)->queue) > 1){
+		++cnt;
+		if(!xQueueReceive(((MqttSubscriber_t*)handle)->queue, &ptr, 0)) continue;
+		subscriber_copy_message((MqttSubscriber_t*)handle, NULL, ptr);
+	}
+	return cnt;
 }
 
 
@@ -336,18 +442,18 @@ static void mqtt_dispatcher_init_task(void*){
 
 static void mqtt_dispatcher_task(void*){
 	size_t msgLen = 0;
-	uint8_t msgBuf[MQTT_MAX_MESSAGE_LEN] = {0};
+	uint8_t msgBuf[MQTT_IN_BUFFER_SIZE] = {0};
 
 	while(1){
 		msgLen = 0;
 		do{
-			msgLen = xMessageBufferReceive(mqtt_in_message_buffer_handle, msgBuf, MQTT_MAX_MESSAGE_LEN, pdMS_TO_TICKS(1000));
+			msgLen = xMessageBufferReceive(mqtt_in_message_buffer_handle, msgBuf, MQTT_IN_BUFFER_SIZE, pdMS_TO_TICKS(1000));
 		}while(!msgLen);
 
 		// parse message
 		MqttResponse_t mqttResp = parse_input(msgBuf, msgLen);
-		MqttMessage_t buffer;
 		MqttSubscriber_t *sub;
+		AllocatedMessage_t *allocMsg;
 
 		switch(mqttResp){
 		case MQTT_CONNECTED:
@@ -364,9 +470,9 @@ static void mqtt_dispatcher_task(void*){
 			break;
 		case MQTT_SUBRECV:
 			if(!xSemaphoreTake(subMutex_handle, pdMS_TO_TICKS(10000))) break;
-			if(parse_message(msgBuf, msgLen, &buffer)){
-				while((sub = get_next_topic_subscriber((MqttTopic_t*)buffer.topic)) != NULL){
-					subscriber_send_message(sub, &buffer);
+			if(parse_message(msgBuf, msgLen, &allocMsg)){
+				while((sub = get_next_topic_subscriber(allocMsg->buffer.topic)) != NULL){
+					subscriber_send_message(sub, allocMsg);
 				}
 			}
 			xSemaphoreGive(subMutex_handle);
@@ -378,8 +484,8 @@ static void mqtt_dispatcher_task(void*){
 	vTaskDelete(NULL);
 }
 
-static inline Response_t mqtt_redirect_callback(uint8_t *msg, int16_t len){
-	if(!xMessageBufferSend(mqtt_in_message_buffer_handle, msg, len + 1, pdMS_TO_TICKS(500))) return OTHR_REDIRECT_TIMEOUT;
+static inline Response_t mqtt_redirect_callback(uint8_t *msg, int16_t len, TickType_t timeout){
+	if(!xMessageBufferSend(mqtt_in_message_buffer_handle, msg, len + 1, timeout)) return OTHR_REDIRECT_TIMEOUT;
 
 	return OTHR_REDIRECT_DONE;
 }
@@ -398,25 +504,42 @@ static MqttResponse_t parse_input(uint8_t *msg, int16_t len){
 }
 
 static BaseType_t subscriber_init(MqttSubscriber_t *handle, int32_t id, uint32_t flags){
-	handle->queue = xQueueCreate(MQTT_MAX_MESSAGES_QUEUED, sizeof(MqttMessage_t));
+#if MQTT_STATIC_MESSAGE_QUEUES
+	handle->queue = xQueueCreateStatic(MQTT_MAX_MESSAGES_QUEUED, sizeof(AllocatedMessage_t*), handle->_queue_storage_buffer, &handle->_queue_static);
+#else
+	handle->queue = xQueueCreate(MQTT_MAX_MESSAGES_QUEUED, sizeof(AllocatedMessage_t*));
+#endif
 	if(handle->queue == NULL) return pdFAIL;
 	handle->id = id;
 	handle->flags = flags;
-	memset(handle->topic_bitfield, 0, TOPIC_BITFIELD_SIZE);
 	return pdPASS;
 }
 
-static BaseType_t subscriber_deinit(MqttSubscriber_t *handle){
+static BaseType_t subscriber_deinit(MqttSubscriber_t *handle, TickType_t timeout){
+	SET_DEADLINE(timeout);
+	for(int16_t i = 0; i < MQTT_MAX_TOPICS; ++i){
+		if(topic_set_subscriber(&topics[i], handle, 0)){
+			if(!topic_has_subscribers(&topics[i])){
+				if(topic_deinit(&topics[i], GET_TIMEOUT) != MQTT_OK)
+					return pdFAIL;
+			}
+		}
+	}
+	//TODO clear subscriptions
+	while(mqtt_poll(handle, NULL, 0)); // clear message queue
+#if !MQTT_STATIC_MESSAGE_QUEUES
 	vQueueDelete(handle->queue);
+#endif
 	handle->queue = NULL;
 	handle->id = -1;
 	handle->flags = MQTT_SUB_DEFAULT;
-	memset(handle->topic_bitfield, 0, TOPIC_BITFIELD_SIZE);
 	return pdPASS;
 }
 
 static MqttResponse_t topic_init(MqttTopic_t *handle, const int8_t *name, int16_t qos, TickType_t timeout){
-	TickType_t deadline = xTaskGetTickCount() + timeout;
+	SET_DEADLINE(timeout);
+	WAIT_FOR_CONN(GET_TIMEOUT);
+
 
 	int32_t nameLen = strlen(name);
 	handle->name = (int8_t*) pvPortMalloc(nameLen + 1);
@@ -425,37 +548,34 @@ static MqttResponse_t topic_init(MqttTopic_t *handle, const int8_t *name, int16_
 	uint8_t cmd[256];
 	int len = sprintf(cmd, "AT+MQTTSUB=0,\"%s\",%d\r\n", name, qos);
 
-	EventBits_t flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, deadline - xTaskGetTickCount());
+	EventBits_t flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, GET_TIMEOUT);
 	if(!(flags & MQTT_FLAG_CONNECTED)){
 		vPortFree(handle->name);
 		return MQTT_TIMEOUT_NOCONN;
 	}
 
-	Response_t resp = esp32_command(cmd, len, AT_RESP_UNKNOWN, deadline - xTaskGetTickCount());
+	Response_t resp = esp32_command(cmd, len, AT_RESP_UNKNOWN, GET_TIMEOUT);
 	if(resp != AT_RESP_OK){
 		vPortFree(handle->name);
 		return MQTT_SUB_FAIL;
 	}
 
-	memset(handle->subscriber_bitfield, 0, SUBSCRIBER_BITFIELD_SIZE);
+	handle->subscriber_bitfield = 0;
 	strcpy(handle->name, name);
 
 	return MQTT_OK;
 }
 
-static MqttResponse_t topic_deinit(MqttTopic_t *handle, TickType_t timeout){
-	TickType_t deadline = xTaskGetTickCount() + timeout;
+static inline MqttResponse_t topic_deinit(MqttTopic_t *handle, TickType_t timeout){
+	SET_DEADLINE(timeout);
 	if(topic_has_subscribers(handle)) return MQTT_SUB_FAIL;
 
 	int8_t cmd[256];
 	int len = sprintf(cmd, "AT+MQTTUNSUB=0\"%s\"\r\n", handle->name);
 
-	EventBits_t flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED, pdFALSE, pdTRUE, deadline - xTaskGetTickCount());
-	if(!(flags & MQTT_FLAG_CONNECTED)){
-		return MQTT_TIMEOUT_NOCONN;
-	}
+	WAIT_FOR_CONN(GET_TIMEOUT);
 
-	Response_t resp = esp32_command(cmd, len, AT_RESP_UNKNOWN, deadline - xTaskGetTickCount());
+	Response_t resp = esp32_command(cmd, len, AT_RESP_UNKNOWN, GET_TIMEOUT);
 	if(resp != AT_RESP_OK){
 		return MQTT_SUB_FAIL;
 	}
@@ -465,29 +585,15 @@ static MqttResponse_t topic_deinit(MqttTopic_t *handle, TickType_t timeout){
 	return MQTT_OK;
 }
 
-static BaseType_t topic_has_subscribers(MqttTopic_t *handle){
-	for(int32_t i = 0; i < TOPIC_BITFIELD_SIZE; ++i) if(handle->subscriber_bitfield[i]) return pdTRUE;
-	return pdFALSE;
+static inline BaseType_t topic_has_subscribers(MqttTopic_t *handle){
+	return !!handle->subscriber_bitfield;
 }
 
-static BaseType_t topic_set_subscriber(MqttTopic_t *topic, MqttSubscriber_t *sub, uint8_t v){
-	int32_t i = ((uint32_t)subscribers - (uint32_t)sub) / sizeof(MqttSubscriber_t);
-	div_t d = div(i, 8);
-	if(!!v == !!(topic->subscriber_bitfield[d.quot] & (1 << d.rem)))
+static inline BaseType_t topic_set_subscriber(MqttTopic_t *topic, MqttSubscriber_t *sub, uint8_t v){
+	if(!!v == !!(topic->subscriber_bitfield & (1 << sub->id)))
 		return pdFALSE;
-	if(v) topic->subscriber_bitfield[d.quot] |= (1 << d.rem);
-	else  topic->subscriber_bitfield[d.quot] &= ~(1 << d.rem);
-
-	return pdTRUE;
-}
-
-static BaseType_t subscriber_set_topic(MqttSubscriber_t *sub, MqttTopic_t *topic, uint8_t v){
-	int32_t i = ((uint32_t)topics - (uint32_t)topic) / sizeof(MqttTopic_t);
-	div_t d = div(i, 8);
-	if(!!v == !!(sub->topic_bitfield[d.quot] & (1 << d.rem)))
-		return pdFALSE;
-	if(v) sub->topic_bitfield[d.quot] |= (1 << d.rem);
-	else  sub->topic_bitfield[d.quot] &= ~(1 << d.rem);
+	if(v) topic->subscriber_bitfield |= (1 << sub->id);
+	else  topic->subscriber_bitfield &= ~(1 << sub->id);
 
 	return pdTRUE;
 }
@@ -500,27 +606,29 @@ static MqttTopic_t *get_topic(const int8_t *name){
 }
 
 static MqttSubscriber_t *get_next_topic_subscriber(MqttTopic_t *topic){
-	static int16_t offset = 0, bi = 0;
-	static uint8_t byte = 0;
+	static int16_t offset = 0, end = 0;
+	static BitField_t bitfield = 0;
+
+	if(!topic->subscriber_bitfield || end){
+		offset = bitfield = end =0;
+		return NULL;
+	}
+
 	MqttSubscriber_t *retval = NULL;
-	for(; bi < SUBSCRIBER_BITFIELD_SIZE && !retval; ++bi, offset = 0){
-		if(!byte) byte = topic->subscriber_bitfield[bi];
-		for(; byte && !retval; byte >>= 1, ++offset){
-			if(byte & 1){
-				retval = &subscribers[bi * 8 + offset];
-			}
+	if(!bitfield) bitfield = topic->subscriber_bitfield;
+	for(; bitfield && !retval; bitfield >>= 1, ++offset){
+		if(bitfield & 1){
+			retval = &subscribers[offset];
 		}
 	}
-	if(!retval)	bi = offset = byte = 0;
+	if(!bitfield) end = 1;
 	return retval;
 }
 
-static BaseType_t parse_message(uint8_t *msg, int16_t len, MqttMessage_t *buffer){
-	buffer->topic = NULL;
-	buffer->len = -1;
-	buffer->value[0] = '\0';
+static BaseType_t parse_message(uint8_t *msg, int16_t len, AllocatedMessage_t **buffer){
 	int8_t *tokens[4] = {NULL};
-	int16_t tokenCount = 0;
+	int16_t tokenCount = 0, msgLen = 0;
+	MqttTopic_t *topic;
 	tokens[0] = strtok(&msg[11], "\"");
 	while(tokens[tokenCount] && tokenCount < 3){
 		if(tokens[tokenCount][0] != '\0')++tokenCount;
@@ -530,29 +638,48 @@ static BaseType_t parse_message(uint8_t *msg, int16_t len, MqttMessage_t *buffer
 	if(tokenCount != 3)
 		return pdFALSE;
 
-	if((buffer->topic = get_topic(tokens[0])) == NULL)
+	if((topic = get_topic(tokens[0])) == NULL)
 		return pdFALSE;
 
-	buffer->len = strtol(tokens[1], NULL, 0);
-	if(!buffer->len || errno == ERANGE){
+	msgLen = strtol(tokens[1], NULL, 0);
+	if(!msgLen || errno == ERANGE){
 		errno = 0;
 		return pdFALSE;
 	}
 
-	memcpy(buffer->value, tokens[2], buffer->len);
-	memset(&buffer->value[buffer->len], 0, MQTT_MAX_MESSAGE_LEN - buffer->len);
+	*buffer = pvPortMalloc(sizeof(AllocatedMessage_t));
+	(*buffer)->checks = topic->subscriber_bitfield;
+	(*buffer)->buffer.len = msgLen;
+	(*buffer)->buffer.topic = topic;
+
+	memcpy((*buffer)->buffer.value, tokens[2], msgLen + 1);
 
 	return pdTRUE;
 }
 
-static void subscriber_send_message(MqttSubscriber_t *sub, MqttMessage_t *msg){
+static inline void subscriber_send_message(MqttSubscriber_t *sub, AllocatedMessage_t *msg){
 	if(uxQueueMessagesWaiting(sub->queue) == MQTT_MAX_MESSAGES_QUEUED){
-		MqttMessage_t dummyBuf;
-		if(sub->flags & MQTT_SUB_ON_QUEUE_FULL_DROP_OLD)	xQueueReceive(sub->queue, &dummyBuf, 0);
-		else return;
+		if(sub->flags & MQTT_SUB_ON_QUEUE_FULL_DROP_OLD)	{
+			AllocatedMessage_t *buf;
+			xQueueReceive(sub->queue, &buf, 0);
+			subscriber_copy_message(sub, NULL, buf);
+		}
+		else {
+			subscriber_copy_message(sub, NULL, msg);
+			return;
+		}
 	}
-	xQueueSend(sub->queue, msg, 0);
+	xQueueSend(sub->queue, &msg, 0);
 }
 
+static inline void subscriber_copy_message(MqttSubscriber_t *sub, MqttMessage_t *buffer, AllocatedMessage_t *msg){
+	BitField_t mask = msg->checks & (1 << sub->id);
+	if(!mask) return;
+	if(buffer){
+		memcpy(buffer, &msg->buffer, sizeof(MqttMessage_t));
+	}
+	if(!(msg->checks &= ~mask))
+		vPortFree(msg);
+}
 
 #pragma GCC diagnostic pop

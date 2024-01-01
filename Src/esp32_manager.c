@@ -36,6 +36,10 @@ typedef struct{
 #define SET_DEADLINE(timeout) TickType_t deadline = (timeout) + xTaskGetTickCount()
 #define GET_TIMEOUT (deadline - xTaskGetTickCount())
 
+#define SET_TIMEOUT_FLAG xEventGroupSetBits(flags_handle, STATUS_TIMEOUT)
+#define GET_TIMEOUT_FLAG (xEventGroupGetBits(flags_handle) & STATUS_TIMEOUT)
+#define CLEAR_TIMEOUT_FLAG xEventGroupClearBits(flags_handle, STATUS_TIMEOUT)
+
 //
 // private variables
 //
@@ -171,7 +175,10 @@ Response_t esp32_response(Response_t acceptedResponse, TickType_t timeout){
 		qResp = xQueueReceive(RxResponseQueue_handle, &resp, GET_TIMEOUT);
 	}while(!(resp & acceptedResponse) && qResp);
 
-	if(qResp != pdTRUE) return AT_SEND_TIMEOUT;
+	if(qResp != pdTRUE) {
+		SET_TIMEOUT_FLAG;
+		return AT_SEND_TIMEOUT;
+	}
 
 	if(!AT_manual_capture){
 		xSemaphoreGive(TxMutex_handle);
@@ -337,6 +344,10 @@ static void esp32_rx_task(void *params){
 			//TODO: handle timeout
 
 		default:
+			if(resp & (AT_RESP_OK | AT_RESP_ERROR) && GET_TIMEOUT_FLAG) {
+				CLEAR_TIMEOUT_FLAG;
+				continue; // ignores final response if timeout flag is set (command is no longer relevant)
+			}
 			qResp = xQueueSend(RxResponseQueue_handle, &resp, GET_TIMEOUT);
 			if(qResp != pdTRUE) continue;
 
@@ -433,12 +444,13 @@ static inline Response_t getResponseType(uint8_t *msg, int16_t len){
 }
 
 static Response_t processOther(uint8_t *msg, int16_t len, TickType_t timeout){
+	SET_DEADLINE(timeout);
 	if(!xSemaphoreTake(RedirectEditMutex_handle, timeout)) return OTHR_REDIRECT_TIMEOUT;
 
 	Response_t retval = OTHR_REDIRECT_NO_ACTION;
 	for(MessageRedirect_t *ptr = msgred_first; ptr != NULL && retval == OTHR_REDIRECT_NO_ACTION; ptr = (MessageRedirect_t*)ptr->next){
 		if(len >= ptr->matchLen && !strncmp(msg, ptr->match, ptr->matchLen)){
-			retval = ptr->callback(&msg[ptr->matchLen], len - ptr->matchLen);
+			retval = ptr->callback(&msg[ptr->matchLen], len - ptr->matchLen, GET_TIMEOUT);
 		}
 	}
 

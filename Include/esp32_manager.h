@@ -44,7 +44,7 @@ typedef enum {
 	 AT_TRANSMIT_FAIL			= (1 << 29)
 }Response_t;
 
-typedef Response_t(*MsgHandler_t)(uint8_t*, int16_t);
+typedef Response_t(*MsgHandler_t)(uint8_t*, int16_t, TickType_t);
 
 typedef struct{
 	const uint8_t *const match;
@@ -58,7 +58,7 @@ typedef struct{
 
 
 #define AT_RESP_IGNORE					(AT_RESP_EMPTY | AT_RESP_AT)
-#define AT_RESP_FINAL					(AT_RESP_OK | AT_RESP_ERROR)
+#define AT_RESP_FINAL					(AT_RESP_OK | AT_RESP_ERROR | AT_RESP_BUSY)
 
 #define STATUS_INITIALIZED				(1 << 0)
 #define STATUS_CONNECTED					(1 << 1)
@@ -67,6 +67,7 @@ typedef struct{
 #define STATUS_TRANSMISSION_FAIL			(1 << 4)
 #define STATUS_TRANSMISSION_SUCCESS		(1 << 5)
 #define STATUS_TRANSMISSION_END			(STATUS_TRANSMISSION_FAIL | STATUS_TRANSMISSION_SUCCESS)
+#define STATUS_TIMEOUT					(1 << 6)
 
 #define STATUS_ALL_GOOD					(0x7)
 
