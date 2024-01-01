@@ -16,7 +16,7 @@ static TaskHandle_t exampleTask_handle;
 static void exampleTask(void*);
 
 void createExampleTask(){
-	xTaskCreate(exampleTask, "Wifi_Example", 256, NULL, 3, &exampleTask_handle);
+	xTaskCreate(exampleTask, "Wifi_Example", sizeof(MqttMessage_t) + 8, NULL, 3, &exampleTask_handle);
 }
 
 
@@ -30,8 +30,13 @@ void exampleTask(void*){
 	while(1){
 		MqttMessage_t msg;
 		while(!mqtt_poll(sub, &msg, pdMS_TO_TICKS(1000)));
-
-		mqtt_pub("test_in0", msg.value, 2, 0, pdMS_TO_TICKS(1000));
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14 | GPIO_PIN_15, GPIO_PIN_RESET);
+		if(mqtt_pub_raw("test_in0", msg.value, msg.len, 2, 0, pdMS_TO_TICKS(1000)) == MQTT_OK){
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET);
+		}
+		else{
+			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_14, GPIO_PIN_SET);
+		}
 	}
 
 	vTaskDelete(NULL);

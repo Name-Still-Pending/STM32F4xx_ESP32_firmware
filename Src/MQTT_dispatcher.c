@@ -146,15 +146,10 @@ MqttResponse_t mqtt_pub_raw(uint8_t *topic, void *msg, uint8_t len, uint8_t qos,
 	int32_t cmdLen = sprintf(cmdBuf, "AT+MQTTPUBRAW=0,\"%s\",%d,%d,%d\r\n", topic, len, (int16_t)qos, retain);
 
 	Response_t esp32Resp = esp32_command_long(cmdBuf, cmdLen, msg, len, GET_TIMEOUT);
-	if(esp32Resp != AT_RESP_NO_WAIT) return MQTT_PUB_FAIL;
+	if(esp32Resp != AT_RESP_OK)
+		return MQTT_PUB_FAIL;
 
-	flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_PUB_OK | MQTT_FLAG_PUB_FAIL, pdTRUE, pdFALSE, GET_TIMEOUT);
-	MqttResponse_t retval;
-	if(flags & MQTT_FLAG_PUB_FAIL) retval = MQTT_PUB_FAIL;
-	else if (flags & MQTT_FLAG_PUB_OK) retval = MQTT_OK;
-	else retval = MQTT_TIMEOUT_BUSY;
-
-	return retval;
+	return MQTT_OK;
 }
 
 MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, TickType_t timeout){
@@ -362,11 +357,9 @@ static void mqtt_dispatcher_task(void*){
 			xEventGroupClearBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED);
 			break;
 		case MQTT_PUB_OK:
-			xEventGroupSetBits(mqtt_flags_handle, MQTT_FLAG_PUB_OK);
 			esp32_confirm_transmission(pdTRUE);
 			break;
 		case MQTT_PUB_FAIL:
-			xEventGroupSetBits(mqtt_flags_handle, MQTT_FLAG_PUB_FAIL);
 			esp32_confirm_transmission(pdFALSE);
 			break;
 		case MQTT_SUBRECV:
