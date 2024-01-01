@@ -63,6 +63,10 @@ typedef struct{
 #define STATUS_INITIALIZED				(1 << 0)
 #define STATUS_CONNECTED					(1 << 1)
 #define STATUS_GOT_IP					(1 << 2)
+#define STATUS_TRANSMISSION_START		(1 << 3)
+#define STATUS_TRANSMISSION_FAIL			(1 << 4)
+#define STATUS_TRANSMISSION_SUCCESS		(1 << 5)
+#define STATUS_TRANSMISSION_END			(STATUS_TRANSMISSION_FAIL | STATUS_TRANSMISSION_SUCCESS)
 
 #define STATUS_ALL_GOOD					(0x7)
 
@@ -72,6 +76,7 @@ typedef struct{
 
 
 #define AT_command_static(cmd, accResp, timeout_ticks) esp32_command(cmd, sizeof(cmd) - 1, accResp, timeout_ticks);
+#define esp32_try_capture(timeout, timeout_resp) if(!esp32_capture(timeout)) return timeout_resp;
 
 #define EXTERN_TASK_HANDLES \
 	TaskHandle_t RxTask_handle;		\
@@ -90,7 +95,7 @@ Response_t 	esp32_command(uint8_t *cmd, int16_t len, Response_t acceptedResponse
 
 Response_t 	esp32_send_raw(void *data, int16_t len, Response_t acceptedResponse, TickType_t timeout);
 
-Response_t 	esp32_command_long(uint8_t *cmd, int16_t cmdLen, void *data, int16_t dataLen, Response_t acceptedResponse, TickType_t timeout);
+Response_t 	esp32_command_long(uint8_t *cmd, int16_t cmdLen, void *data, int16_t dataLen, TickType_t timeout);
 
 Response_t 	esp32_response(Response_t acceptedResponse, TickType_t timeout);
 
@@ -103,6 +108,8 @@ BaseType_t 	esp32_release();
 size_t 		esp32_get_other(void *buffer, size_t maxSize, TickType_t timeout);
 
 BaseType_t  esp32_status_wait(EventBits_t bits, BaseType_t waitForAll, TickType_t timeout);
+
+void		esp32_confirm_transmission(uint8_t success);
 
 BaseType_t	esp32_add_redirect_handler(MessageRedirect_t *const handler, TickType_t timeout);
 

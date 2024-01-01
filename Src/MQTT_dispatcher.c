@@ -102,10 +102,13 @@ static MqttSubscriber_t		subscribers[MQTT_MAX_SUBSCRIBERS];
 //
 
 BaseType_t mqtt_init(){
-
+#define NULL_CHECK(handle)if(!handle) return pdFAIL;
 	mqtt_flags_handle 				= xEventGroupCreateStatic(&mqtt_flags_static);
+	NULL_CHECK(mqtt_flags_handle)
 	mqtt_in_message_buffer_handle 	= xMessageBufferCreate(MQTT_IN_BUFFER_SIZE);
+	NULL_CHECK(mqtt_in_message_buffer_handle)
 	subMutex_handle					= xSemaphoreCreateMutexStatic(&subMutex_static);
+	NULL_CHECK(subMutex_handle)
 
 	for(int32_t i = 0; i < MQTT_MAX_SUBSCRIBERS; ++i){
 		subscribers[i].id = -1;
@@ -142,7 +145,7 @@ MqttResponse_t mqtt_pub_raw(uint8_t *topic, void *msg, uint8_t len, uint8_t qos,
 	int8_t cmdBuf[256] = {0};
 	int32_t cmdLen = sprintf(cmdBuf, "AT+MQTTPUBRAW=0,\"%s\",%d,%d,%d\r\n", topic, len, (int16_t)qos, retain);
 
-	Response_t esp32Resp = esp32_command_long(cmdBuf, cmdLen, msg, len, AT_RESP_NO_WAIT, GET_TIMEOUT);
+	Response_t esp32Resp = esp32_command_long(cmdBuf, cmdLen, msg, len, GET_TIMEOUT);
 	if(esp32Resp != AT_RESP_NO_WAIT) return MQTT_PUB_FAIL;
 
 	flags = xEventGroupWaitBits(mqtt_flags_handle, MQTT_FLAG_PUB_OK | MQTT_FLAG_PUB_FAIL, pdTRUE, pdFALSE, GET_TIMEOUT);
@@ -265,7 +268,6 @@ MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t 
 	return retval;
 }
 
-
 inline BaseType_t mqtt_poll(MqttSubHandle_t handle, MqttMessage_t *message, TickType_t timeout){
 	return xQueueReceive(((MqttSubscriber_t*)handle)->queue, message, timeout);
 }
@@ -328,6 +330,8 @@ static void mqtt_dispatcher_init_task(void*){
 	}
 	xEventGroupSetBits(mqtt_flags_handle, MQTT_FLAG_INITIALIZED);
 	vTaskDelay(pdMS_TO_TICKS(1000));
+
+	//TODO Fix hard fault on task delete
 #if 1
 	vTaskSuspend(NULL);
 #else
@@ -357,11 +361,13 @@ static void mqtt_dispatcher_task(void*){
 		case MQTT_DISCONNECTED:
 			xEventGroupClearBits(mqtt_flags_handle, MQTT_FLAG_CONNECTED);
 			break;
-		case MQTT_OK:
+		case MQTT_PUB_OK:
 			xEventGroupSetBits(mqtt_flags_handle, MQTT_FLAG_PUB_OK);
+			esp32_confirm_transmission(pdTRUE);
 			break;
 		case MQTT_PUB_FAIL:
 			xEventGroupSetBits(mqtt_flags_handle, MQTT_FLAG_PUB_FAIL);
+			esp32_confirm_transmission(pdFALSE);
 			break;
 		case MQTT_SUBRECV:
 			if(!xSemaphoreTake(subMutex_handle, pdMS_TO_TICKS(10000))) break;
@@ -387,7 +393,7 @@ static inline Response_t mqtt_redirect_callback(uint8_t *msg, int16_t len){
 
 static MqttResponse_t parse_input(uint8_t *msg, int16_t len){
 	if(len >= 6 && !strncmp(msg, "PUB:", 4)){
-		if(!strncmp(&msg[4], "OK", 2))					return MQTT_OK;
+		if(!strncmp(&msg[4], "OK", 2))					return MQTT_PUB_OK;
 		if(len >= 8 && !strncmp(&msg[4], "FAIL", 4))	return MQTT_PUB_FAIL;
 														return MQTT_UNKNOWN;
 	}

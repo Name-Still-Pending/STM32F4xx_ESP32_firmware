@@ -81,12 +81,18 @@ BaseType_t esp32_init(UART_HandleTypeDef *uart){
 	RxTaskParams_TypeDef rxParams = {0};
 	rxParams.recieveWaitTicks = pdMS_TO_TICKS(500);
 	rxParams.processMsgTimeout = pdMS_TO_TICKS(1000);
-
+#define NULL_CHECK(handle)if(!handle) return pdFAIL;
 	TxMutex_handle 				= xSemaphoreCreateMutex();
+	NULL_CHECK(TxMutex_handle)
 	RxResponseQueue_handle 		= xQueueCreate(20, sizeof(Response_t));
+	NULL_CHECK(RxResponseQueue_handle)
 	RxOtherMessageBuffer_handle 	= xMessageBufferCreate(256);
+	NULL_CHECK(RxOtherMessageBuffer_handle)
 	flags_handle					= xEventGroupCreateStatic(&flags_static);
+	NULL_CHECK(flags_handle)
 	RedirectEditMutex_handle	= xSemaphoreCreateMutexStatic(&redirectEditMutex_static);
+	NULL_CHECK(RedirectEditMutex_handle)
+#undef NULL_CHECK
 
 	__HAL_UART_ENABLE_IT(UART, UART_IT_RXNE);
 
@@ -99,23 +105,20 @@ BaseType_t esp32_init(UART_HandleTypeDef *uart){
 	return pdPASS;
 }
 
-
-
 Response_t esp32_command(uint8_t *cmd, int16_t len, Response_t acceptedResponse, TickType_t timeout){
+	SET_DEADLINE(timeout);
 	if(len < 0) len = strlen(cmd);
 	if(strcmp((int8_t*)&cmd[len - 2], "\r\n")) return AT_INVALID;
 	if(len > 256) return AT_INVALID;
 
 	if(acceptedResponse != AT_RESP_NO_WAIT) acceptedResponse |= AT_RESP_FINAL;
-	return esp32_send_raw(cmd, len, acceptedResponse, timeout);
+	return esp32_send_raw(cmd, len, acceptedResponse, GET_TIMEOUT);
 }
 
-
-
 Response_t esp32_send_raw(void *data, int16_t len, Response_t acceptedResponse, TickType_t timeout){
+	SET_DEADLINE(timeout);
 	BaseType_t resp;
 	HAL_StatusTypeDef hStatus;
-	TickType_t tickStart = xTaskGetTickCount();
 	if(!AT_manual_capture){
 		resp = xSemaphoreTake(TxMutex_handle, timeout);
 		if(!resp) return AT_SEND_TIMEOUT;
@@ -125,19 +128,34 @@ Response_t esp32_send_raw(void *data, int16_t len, Response_t acceptedResponse, 
 	if(hStatus != HAL_OK) return AT_TRANSMIT_FAIL;
 	if(acceptedResponse == AT_RESP_NO_WAIT) return AT_RESP_NO_WAIT;
 
-	return esp32_response(acceptedResponse, timeout - xTaskGetTickCount() + tickStart);
+	return esp32_response(acceptedResponse, GET_TIMEOUT);
 }
 
-
-Response_t 	esp32_command_long(uint8_t *cmd, int16_t cmdLen, void *data, int16_t dataLen, Response_t acceptedResponse, TickType_t timeout){
-	if(!esp32_capture(timeout)) return AT_SEND_TIMEOUT;
-	TickType_t tickStart = xTaskGetTickCount();
+Response_t 	esp32_command_long(uint8_t *cmd, int16_t cmdLen, void *data, int16_t dataLen, TickType_t timeout){
+	SET_DEADLINE(timeout);
+	if(!esp32_capture(GET_TIMEOUT)) return AT_SEND_TIMEOUT;
 	Response_t retval = AT_RESP_OK;
 	do{
-		retval = esp32_command(cmd, cmdLen, AT_RESP_FINAL, timeout - xTaskGetTickCount() + tickStart);
+		retval = esp32_command(cmd, cmdLen, AT_RESP_FINAL, GET_TIMEOUT);
 		if(retval != AT_RESP_OK) break;
+		if(!(xEventGroupWaitBits(flags_handle, STATUS_TRANSMISSION_START, pdTRUE, pdTRUE, GET_TIMEOUT) & STATUS_TRANSMISSION_START)){
+			retval = AT_SEND_TIMEOUT;
+			break;
+		}
+		retval = esp32_send_raw(data, dataLen, AT_RESP_NO_WAIT, GET_TIMEOUT);
+		if(retval != AT_RESP_NO_WAIT) break;
 
-		retval = esp32_send_raw(data, dataLen, acceptedResponse, timeout - xTaskGetTickCount() + tickStart);
+		switch(xEventGroupWaitBits(flags_handle, STATUS_TRANSMISSION_END, pdTRUE, pdFALSE, GET_TIMEOUT) & STATUS_TRANSMISSION_END){
+		case STATUS_TRANSMISSION_SUCCESS:
+			retval = AT_RESP_OK;
+			break;
+		case STATUS_TRANSMISSION_FAIL:
+			retval = AT_RESP_SEND_FAIL;
+			break;
+		default:
+			retval = AT_SEND_TIMEOUT;
+		}
+
 	}while(0);
 
 	esp32_release();
@@ -145,14 +163,12 @@ Response_t 	esp32_command_long(uint8_t *cmd, int16_t cmdLen, void *data, int16_t
 	return retval;
 }
 
-
-
 Response_t esp32_response(Response_t acceptedResponse, TickType_t timeout){
 	BaseType_t qResp;
 	Response_t resp = 0;
-	TickType_t tickStart = xTaskGetTickCount();
+	SET_DEADLINE(timeout);
 	do{
-		qResp = xQueueReceive(RxResponseQueue_handle, &resp, timeout - xTaskGetTickCount() + tickStart);
+		qResp = xQueueReceive(RxResponseQueue_handle, &resp, GET_TIMEOUT);
 	}while(!(resp & acceptedResponse) && qResp);
 
 	if(qResp != pdTRUE) return AT_SEND_TIMEOUT;
@@ -163,9 +179,6 @@ Response_t esp32_response(Response_t acceptedResponse, TickType_t timeout){
 
 	return resp;
 }
-
-
-
 
 inline BaseType_t esp32_capture(TickType_t timeout){
 	BaseType_t resp;
@@ -196,7 +209,9 @@ inline BaseType_t  esp32_status_wait(EventBits_t bits, BaseType_t waitForAll, Ti
 	return (waitForAll && setBits == bits) || (!waitForAll && setBits);
 }
 
-
+inline void esp32_confirm_transmission(uint8_t success){
+	xEventGroupSetBits(flags_handle, success ? STATUS_TRANSMISSION_SUCCESS : STATUS_TRANSMISSION_FAIL);
+}
 
 BaseType_t	esp32_add_redirect_handler(MessageRedirect_t *const handler, TickType_t timeout){
 	if(!xSemaphoreTake(RedirectEditMutex_handle, timeout)) return pdFAIL;
@@ -259,14 +274,17 @@ static void esp32_rx_task(void *params){
 				xTaskNotifyWait(pdFALSE, 0xffffffff, NULL, p.recieveWaitTicks);
 				continue;
 			}
-			if(msgBuf[0] == '>') continue;
+			if(msgBuf[0] == '>'){
+				xEventGroupSetBits(flags_handle, STATUS_TRANSMISSION_START);
+				continue;
+			}
 			if(match[match_i] == msgBuf[msgLen]) ++match_i;
 			else match_i = 0;
 			++msgLen;
 		}
 
 		// parse message type
-		TickType_t tickStart = xTaskGetTickCount();
+		SET_DEADLINE(p.processMsgTimeout);
 		Response_t resp;
 		if(msgLen == RX_MESSAGE_MAX_LEN && match_i < 2){
 			resp = RX_MESSAGE_TOO_LONG;
@@ -286,6 +304,14 @@ static void esp32_rx_task(void *params){
 		case AT_RESP_UNKNOWN:
 			continue;
 
+		case AT_RESP_SEND_OK:
+			xEventGroupSetBits(flags_handle, STATUS_TRANSMISSION_SUCCESS);
+			break;
+
+		case AT_RESP_SEND_FAIL:
+			xEventGroupSetBits(flags_handle, STATUS_TRANSMISSION_FAIL);
+			break;
+
 		case AT_RESP_WIFI_CONNECTED:
 			xEventGroupSetBits(flags_handle, STATUS_CONNECTED);
 			break;
@@ -299,19 +325,19 @@ static void esp32_rx_task(void *params){
 			break;
 
 		case AT_RESP_OTHER:
-			Response_t othrResp = processOther(&msgBuf[1], msgLen - 1, p.processMsgTimeout - xTaskGetTickCount() + tickStart);
+			Response_t othrResp = processOther(&msgBuf[1], msgLen - 1, GET_TIMEOUT);
 			if(othrResp == OTHR_REDIRECT_DONE) break;
 			if(othrResp == OTHR_REDIRECT_INCOMPLETE){
-				strncpy(&msgBuf[msgLen], "\r\n", 2);
+				memcpy(&msgBuf[msgLen], "\r\n", 2);
 				cont = 1;
 				continue;
 			}
 
-			xMessageBufferSend(RxOtherMessageBuffer_handle, &msgBuf[1], msgLen - 1, p.processMsgTimeout - xTaskGetTickCount() + tickStart);
+			xMessageBufferSend(RxOtherMessageBuffer_handle, &msgBuf[1], msgLen - 1, GET_TIMEOUT);
 			//TODO: handle timeout
 
 		default:
-			qResp = xQueueSend(RxResponseQueue_handle, &resp, p.processMsgTimeout - xTaskGetTickCount() + tickStart);
+			qResp = xQueueSend(RxResponseQueue_handle, &resp, GET_TIMEOUT);
 			if(qResp != pdTRUE) continue;
 
 		}
@@ -374,8 +400,11 @@ static void esp32_init_task(void* params){
 	}
 
 	xEventGroupSetBits(flags_handle, STATUS_INITIALIZED);
-
+#if 1
 	vTaskDelete(NULL);
+#else
+	vTaskSuspend(NULL);
+#endif
 }
 
 static inline Response_t getResponseType(uint8_t *msg, int16_t len){

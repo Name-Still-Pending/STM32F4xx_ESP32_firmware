@@ -26,10 +26,11 @@
 
 typedef enum {
 	MQTT_OK							= (0),
-	MQTT_PUB_FAIL					= (1 << 0),
-	MQTT_SUBRECV					= (1 << 1),
-	MQTT_CONNECTED					= (1 << 2),
-	MQTT_DISCONNECTED				= (1 << 3),
+	MQTT_PUB_OK						= (1 << 0),
+	MQTT_PUB_FAIL					= (1 << 1),
+	MQTT_SUBRECV					= (1 << 2),
+	MQTT_CONNECTED					= (1 << 3),
+	MQTT_DISCONNECTED				= (1 << 4),
 
 	MQTT_SUB_FAIL_TOPICS_FULL		= (1 << 21),
 	MQTT_UNSUB_FAIL_BAD_TOPIC		= (1 << 22),
