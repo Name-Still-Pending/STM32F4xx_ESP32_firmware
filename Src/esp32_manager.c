@@ -341,10 +341,17 @@ static void esp32_rx_task(void *params){
 			}
 
 			xMessageBufferSend(RxOtherMessageBuffer_handle, &msgBuf[1], msgLen - 1, GET_TIMEOUT);
-			//TODO: handle timeout
+			break;
 
+		case AT_RESP_OK:
+		case AT_RESP_ERROR:
+		case AT_RESP_BUSY:
+			if(GET_TIMEOUT_FLAG){
+				if(resp != AT_RESP_BUSY) CLEAR_TIMEOUT_FLAG;
+				break;
+			}
 		default:
-			if(resp & (AT_RESP_OK | AT_RESP_ERROR) && GET_TIMEOUT_FLAG) {
+			if(resp &  && GET_TIMEOUT_FLAG) {
 				CLEAR_TIMEOUT_FLAG;
 				continue; // ignores final response if timeout flag is set (command is no longer relevant)
 			}
