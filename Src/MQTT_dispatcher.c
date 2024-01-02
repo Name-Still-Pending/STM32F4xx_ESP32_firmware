@@ -122,11 +122,6 @@ static MqttSubscriber_t		subscribers[MQTT_MAX_SUBSCRIBERS];
 //
 // public function definitions
 //
-/**
- * @brief Initializes all components of the MQTT dispatch system. Creates the MQTT_dispatcher and MQTT_dispatcher_init (timeout 60 s) tasks.
- * @note Uses ESP32 communication. eps32_manager must be successfully initialized.
- * @retval pdPASS on successful completion, pdFAIL otherwise
- */
 BaseType_t mqtt_init(){
 #define NULL_CHECK(handle)if(!handle) return pdFAIL;
 	mqtt_flags_handle 				= xEventGroupCreateStatic(&mqtt_flags_static);
@@ -150,16 +145,6 @@ BaseType_t mqtt_init(){
 	return pdPASS;
 }
 
-/**
- * @brief Publishes an MQTT message.
- * @note Meant for text only, do not use commas. If you want to publish binary data or messages where the publish command would exceed 256 characters, use mqtt_pub_raw instead.
- * @param topic: MQTT topic to publish to
- * @param msg: Message to publish
- * @param qos: Quality of service level [0, 2]
- * @param retain: true / false, retain message.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_pub(int8_t *topic, uint8_t *msg, uint8_t qos, uint8_t retain, TickType_t timeout){
 	SET_DEADLINE(timeout);
 	WAIT_FOR_CONN(GET_TIMEOUT);
@@ -172,16 +157,6 @@ MqttResponse_t mqtt_pub(int8_t *topic, uint8_t *msg, uint8_t qos, uint8_t retain
 	return esp32Resp == AT_RESP_OK ? MQTT_OK : MQTT_PUB_FAIL;
 }
 
-/**
- * @brief Publishes raw data to MQTT.
- * @param topic: MQTT topic to publish to
- * @param data: Data to publish.
- * @param len: Exact size (bytes) of published data.
- * @param qos: Quality of service level [0, 2]
- * @param retain: true / false, retain message.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_pub_raw(int8_t *topic, void *data, uint8_t len, uint8_t qos, uint8_t retain, TickType_t timeout){
 	SET_DEADLINE(timeout);
 	WAIT_FOR_CONN(GET_TIMEOUT);
@@ -196,16 +171,6 @@ MqttResponse_t mqtt_pub_raw(int8_t *topic, void *data, uint8_t len, uint8_t qos,
 	return MQTT_OK;
 }
 
-/**
- * @brief Initializes a subscriber and returns a handle.
- * @note Not thread-safe. Do not share subscribers across threads/tasks.
- * @note Make sure not to lose the handle.
- * @note The total number of subscribers globally cannot exceed the MQTT_MAX_SUBSCRIBERS predefine (see MQTT_dispatcher_config.h)
- * @param handle: Pointer to the variable where you want to store the subscriber handle.
- * @param flags: Subscriber behavior settings. Use MqttSubscriberFlags_t enum.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, TickType_t timeout){
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
 	MqttResponse_t retval = MQTT_OK;
@@ -235,13 +200,6 @@ MqttResponse_t mqtt_add_subscriber(MqttSubHandle_t *handle, uint32_t flags, Tick
 	return retval;
 }
 
-/**
- * @brief Destroys a subscriber, freeing its slot.
- * @note Untested, may not work.
- * @param handle: Pointer to the variable, where the subscriber handle is stored. Said handle will be set to NULL on success.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_remove_subscriber(MqttSubHandle_t *handle, TickType_t timeout){
 	SET_DEADLINE(timeout);
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
@@ -259,15 +217,6 @@ MqttResponse_t mqtt_remove_subscriber(MqttSubHandle_t *handle, TickType_t timeou
 	return retval;
 }
 
-/**
- * @brief Subscribes a subscriber to a topic.
- * @note The amount of unique topics across all subscribers globally is limited by MQTT_MAX_TOPICS predefine (see MQTT_dispatcher_config.h)
- * @param handle: Handle of the subscriber.
- * @param topicHandle: Pointer to the handle of the subscribed topic. If you do not need the handle (unadvised), you can pass NULL.
- * @param topic: Name of the topic.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *topicHandle, const int8_t *topic, TickType_t timeout){
 	SET_DEADLINE(timeout);
 
@@ -304,15 +253,6 @@ MqttResponse_t mqtt_subscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *t
 	return retval;
 }
 
-/**
- * @brief Unsubscribes a subscriber from a topic.
- * @note If there are no more subscriptions to the topic, it will be destroyed, freeing its slot.
- * @note Untested, probably doesn't work.
- * @param handle: Subscriber handle.
- * @param topic: Pointer to the topic handle, so that it can be set to NULL on success.
- * @param timeout: Operation timeout.
- * @retval MQTT_OK on success, other on error.
- */
 MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t *topic, TickType_t timeout){
 	SET_DEADLINE(timeout);
 	if(!xSemaphoreTake(subMutex_handle, timeout)) return MQTT_TIMEOUT_BUSY;
@@ -342,13 +282,6 @@ MqttResponse_t mqtt_unsubscribe_topic(MqttSubHandle_t handle, MqttTopicHandle_t 
 	return retval;
 }
 
-/**
- * @brief Waits for a message to arrive.
- * @param handle: Subscriber handle.
- * @param message: Received message buffer.
- * @param timeout: Operation timeout.
- * @retval pdTRUE on message received, pdFALSE on timeout.
- */
 inline BaseType_t mqtt_poll(MqttSubHandle_t handle, MqttMessage_t *message, TickType_t timeout){
 	AllocatedMessage_t *allocMsg;
 	if(!xQueueReceive(((MqttSubscriber_t*)handle)->queue, &allocMsg, timeout)) return pdFALSE;
@@ -356,12 +289,6 @@ inline BaseType_t mqtt_poll(MqttSubHandle_t handle, MqttMessage_t *message, Tick
 	return pdTRUE;
 }
 
-/**
- * @brief Moves the queue to the latest message.
- * @note This could technically turn into an infinite loop, if the messages were written to the queue fast enough, but that should be impossible in practice.
- * @param handle: Subscriber handle
- * @retval The number of discarded messages.
- */
 BaseType_t mqtt_to_latest(MqttSubHandle_t handle){
 	BaseType_t cnt = 0;
 	AllocatedMessage_t *ptr;
