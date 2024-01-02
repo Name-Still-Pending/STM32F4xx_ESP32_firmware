@@ -36,9 +36,9 @@ typedef struct{
 #define SET_DEADLINE(timeout) TickType_t deadline = (timeout) + xTaskGetTickCount()
 #define GET_TIMEOUT (deadline - xTaskGetTickCount())
 
-#define SET_TIMEOUT_FLAG xEventGroupSetBits(flags_handle, STATUS_TIMEOUT)
-#define GET_TIMEOUT_FLAG (xEventGroupGetBits(flags_handle) & STATUS_TIMEOUT)
-#define CLEAR_TIMEOUT_FLAG xEventGroupClearBits(flags_handle, STATUS_TIMEOUT)
+#define SET_IDLE_FLAG xEventGroupSetBits(flags_handle, STATUS_IDLE)
+#define GET_IDLE_FLAG (xEventGroupGetBits(flags_handle) & STATUS_IDLE)
+#define CLEAR_IDLE_FLAG xEventGroupClearBits(flags_handle, STATUS_IDLE)
 
 //
 // private variables
@@ -88,7 +88,7 @@ BaseType_t esp32_init(UART_HandleTypeDef *uart){
 #define NULL_CHECK(handle)if(!handle) return pdFAIL;
 	TxMutex_handle 				= xSemaphoreCreateMutex();
 	NULL_CHECK(TxMutex_handle)
-	RxResponseQueue_handle 		= xQueueCreate(20, sizeof(Response_t));
+	RxResponseQueue_handle 		= xQueueCreate(5, sizeof(Response_t));
 	NULL_CHECK(RxResponseQueue_handle)
 	RxOtherMessageBuffer_handle 	= xMessageBufferCreate(256);
 	NULL_CHECK(RxOtherMessageBuffer_handle)
@@ -116,6 +116,7 @@ Response_t esp32_command(uint8_t *cmd, int16_t len, Response_t acceptedResponse,
 	if(len > 256) return AT_INVALID;
 
 	if(acceptedResponse != AT_RESP_NO_WAIT) acceptedResponse |= AT_RESP_FINAL;
+//	if(!(xEventGroupWaitBits(flags_handle, STATUS_IDLE, pdTRUE, pdFALSE, GET_TIMEOUT) & STATUS_IDLE)) return AT_SEND_TIMEOUT;
 	return esp32_send_raw(cmd, len, acceptedResponse, GET_TIMEOUT);
 }
 
@@ -176,7 +177,6 @@ Response_t esp32_response(Response_t acceptedResponse, TickType_t timeout){
 	}while(!(resp & acceptedResponse) && qResp);
 
 	if(qResp != pdTRUE) {
-		SET_TIMEOUT_FLAG;
 		return AT_SEND_TIMEOUT;
 	}
 
@@ -306,8 +306,9 @@ static void esp32_rx_task(void *params){
 		BaseType_t qResp;
 
 		switch(resp){
-		case AT_RESP_EMPTY:
 		case AT_RESP_AT:
+			xQueueReset(RxResponseQueue_handle);
+		case AT_RESP_EMPTY:
 		case AT_RESP_UNKNOWN:
 			continue;
 
@@ -341,15 +342,9 @@ static void esp32_rx_task(void *params){
 			}
 
 			xMessageBufferSend(RxOtherMessageBuffer_handle, &msgBuf[1], msgLen - 1, GET_TIMEOUT);
-			break;
-
 		case AT_RESP_OK:
 		case AT_RESP_ERROR:
-		case AT_RESP_BUSY:
-			if(GET_TIMEOUT_FLAG){
-				if(resp != AT_RESP_BUSY) CLEAR_TIMEOUT_FLAG;
-				break;
-			}
+			SET_IDLE_FLAG;
 		default:
 			qResp = xQueueSend(RxResponseQueue_handle, &resp, GET_TIMEOUT);
 			if(qResp != pdTRUE) continue;

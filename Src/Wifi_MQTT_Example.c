@@ -13,6 +13,13 @@
 
 /**
  * This is a very basic example of MQTT dispatcher API use.
+ * It creates two tasks, each creating their own MQTT subscriber and subscribing it to topics
+ * 'test_in0' and 'test_in1'. When they receive a message they simply publish it back to their respective
+ * output topics ('test_in0" for task 'Wifi_Example_1' and 'test_in1' for task 'Wifi_example_2'.
+ *
+ * To test this you need an MQTT broker (with a known IP address and compatible configuration). You create subscriptions to its
+ * topics 'test_in0' and 'test_in1' (using whatever software allows you to do so). Any messages you publish to topics
+ * 'test_out0' and 'test_out1' should be received by the subscribers.
  */
 
 static TaskHandle_t exampleTask_handle;
@@ -69,8 +76,10 @@ static void exampleTask(void* params){
 		 * Anyway, you should avoid timeouts, their handling is untested and likely faulty.
 		 *
 		 * If you intend to send raw data or long messages, use mqtt_pub_raw instead.
+		 *
+		 * Lower QOS can drastically reduce the operation time.
 		 */
-		if(mqtt_pub((char*)params, msg.value, 2, 0, pdMS_TO_TICKS(5000)) == MQTT_OK){
+		if(mqtt_pub((char*)params, msg.value, 0, 0, pdMS_TO_TICKS(5000)) == MQTT_OK){
 			HAL_GPIO_WritePin(GPIOD, GPIO_PIN_15, GPIO_PIN_SET); // Light blue LED on success.
 		}
 		else{
