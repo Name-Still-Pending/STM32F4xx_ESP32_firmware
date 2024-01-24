@@ -139,8 +139,10 @@ BaseType_t mqtt_init(){
 	BaseType_t resp;
 	resp = xTaskCreate(mqtt_dispatcher_task, "MQTT_dispatcher", 1024, NULL, 2, &mqtt_dispatcher_handle);
 	if(resp != pdPASS) return resp;
-	resp = xTaskCreate(mqtt_dispatcher_init_task, "MQTT_dispatcher_init", 256, NULL, 1, &mqtt_dispatcher_init_handle);
+	resp = xTaskCreate(mqtt_dispatcher_init_task, "MQTT_init", 256, NULL, 1, &mqtt_dispatcher_init_handle);
 	if(resp != pdPASS) return resp;
+
+	vQueueAddToRegistry(subMutex_handle, "SubMutex");
 
 	return pdPASS;
 }
@@ -360,7 +362,7 @@ static void mqtt_dispatcher_init_task(void*){
 	vTaskDelay(pdMS_TO_TICKS(1000));
 
 	//TODO Fix hard fault on task delete
-#if 1
+#if 0
 	vTaskSuspend(NULL);
 #else
 	vTaskDelete(NULL);
@@ -439,6 +441,9 @@ static BaseType_t subscriber_init(MqttSubscriber_t *handle, int32_t id, uint32_t
 	if(handle->queue == NULL) return pdFAIL;
 	handle->id = id;
 	handle->flags = flags;
+	char *queue_name_buf = (char*)pvPortMalloc(12);
+	sprintf(queue_name_buf, "UserQueue%ld", handle->id);
+	vQueueAddToRegistry(handle->queue, queue_name_buf);
 	return pdPASS;
 }
 

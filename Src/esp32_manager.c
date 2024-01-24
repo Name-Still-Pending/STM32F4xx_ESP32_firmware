@@ -90,6 +90,7 @@ BaseType_t esp32_init(UART_HandleTypeDef *uart){
 	NULL_CHECK(TxMutex_handle)
 	RxResponseQueue_handle 		= xQueueCreate(5, sizeof(Response_t));
 	NULL_CHECK(RxResponseQueue_handle)
+	// Is this message buffer a relic of the development process that's used nowhere? Yes. Can it be removed? No.
 	RxOtherMessageBuffer_handle 	= xMessageBufferCreate(256);
 	NULL_CHECK(RxOtherMessageBuffer_handle)
 	flags_handle					= xEventGroupCreateStatic(&flags_static);
@@ -105,6 +106,10 @@ BaseType_t esp32_init(UART_HandleTypeDef *uart){
 	if(resp != pdPASS) return resp;
 	resp = xTaskCreate(esp32_init_task, "esp32_init", 100, NULL, 1, &init_task_handle);
 	if(resp != pdPASS) return resp;
+
+	vQueueAddToRegistry(RxResponseQueue_handle, "RxResponseQueue");
+	vQueueAddToRegistry(TxMutex_handle, "TxMutex");
+	vQueueAddToRegistry(RedirectEditMutex_handle, "RedirectEditMutex");
 
 	return pdPASS;
 }
@@ -199,10 +204,6 @@ inline BaseType_t esp32_release(){
 	if(!AT_manual_capture) return pdFALSE;
 	AT_manual_capture = 0;
 	return xSemaphoreGive(TxMutex_handle);
-}
-
-inline size_t esp32_get_other(void *buffer, size_t maxSize, TickType_t timeout){
-	return xMessageBufferReceive(RxOtherMessageBuffer_handle, buffer, maxSize, timeout);
 }
 
 inline uint16_t esp32_clear_response_queue(){
@@ -341,7 +342,6 @@ static void esp32_rx_task(void *params){
 				continue;
 			}
 
-			xMessageBufferSend(RxOtherMessageBuffer_handle, &msgBuf[1], msgLen - 1, GET_TIMEOUT);
 		case AT_RESP_OK:
 		case AT_RESP_ERROR:
 			SET_IDLE_FLAG;

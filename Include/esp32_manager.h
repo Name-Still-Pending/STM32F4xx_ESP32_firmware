@@ -106,8 +106,6 @@ BaseType_t	esp32_capture(TickType_t timeout);
 
 BaseType_t 	esp32_release();
 
-size_t 		esp32_get_other(void *buffer, size_t maxSize, TickType_t timeout);
-
 BaseType_t  esp32_status_wait(EventBits_t bits, BaseType_t waitForAll, TickType_t timeout);
 
 void		esp32_confirm_transmission(uint8_t success);
